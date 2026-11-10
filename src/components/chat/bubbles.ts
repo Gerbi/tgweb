@@ -40,7 +40,7 @@ import RepliesElement from '@components/chat/replies';
 import DEBUG from '@config/debug';
 import Modes from '@config/modes';
 import {SliceEnd} from '@helpers/slicedArray';
-import PeerTitle from '@components/peerTitle';
+import PeerTitle, {createPeerTitleElement} from '@components/peerTitle';
 import findUpClassName from '@helpers/dom/findUpClassName';
 import {countFirstScreen, estimateBubbleHeight, FirstScreenPlace, getAlbumBubbleMessage, getBubbleHeightAtLeast, GetWidgetHeight, joinHistories, keepFrom, keepRange, measureTextWidth, MessageTextMetrics} from '@components/chat/firstScreenHistory';
 import findUpTag from '@helpers/dom/findUpTag';
@@ -215,6 +215,7 @@ import {wrapRoundVideoBubble} from '@components/chat/bubbleParts/roundVideoBubbl
 import {createMessageSpoilerOverlay, updateMessageSpoilerOverlays} from '@components/messageSpoilerOverlay';
 import {getReplyQuote} from '@lib/richQuote';
 import {getRichQuoteTextOffset} from '@components/chat/richQuoteSelection';
+import {expandTextMatchDetails} from '@components/instantView/details';
 import SolidJSHotReloadGuardProvider, {hotReloadGuard} from '@lib/solidjs/hotReloadGuardProvider';
 import formatStarsAmount from '@appManagers/utils/payments/formatStarsAmount';
 import {Sparkles} from '@components/sparkles';
@@ -6108,6 +6109,12 @@ export default class ChatBubbles {
       this.log.error('element is not connected', bubble);
     }
 
+    // * the text about to be lit up may sit in a collapsed details of a rich message: opened before anything here is
+    // * measured, so the scroll lands where it would if it had been open
+    if(focusOn?.textHighlight) {
+      this.expandBubbleTextDetails(element, focusOn.textHighlight);
+    }
+
     let fallbackToElementStartWhenCentering: HTMLElement;
     // * if it's a start, then scroll to start of the group
     if(bubble && position !== 'end') {
@@ -6321,16 +6328,19 @@ export default class ChatBubbles {
       return;
     }
 
-    const container = this.getBubbleTextContainer(element);
-    if(!container) {
+    // * the collapsed details holding it are opened on the way here already, unless no scroll took it here
+    const prepared = this.expandBubbleTextDetails(element, match);
+    if(!prepared) {
       return;
     }
+
+    const {container, match: containerMatch} = prepared;
 
     // * `.message` is positioned and paints below `.bubble-content` background — full line boxes,
     // * appearing iOS-style: the whole text selected, then narrowing down onto the match
     const highlight = highlightText({
       container,
-      match: this.getBubbleTextMatch(container, match),
+      match: containerMatch,
       skip: BUBBLE_TEXT_HIGHLIGHT_SKIP,
       lineBoxes: true,
       animateIn: true
@@ -6349,6 +6359,21 @@ export default class ChatBubbles {
       clearTimeout(timeout);
       highlight.dispose();
     });
+  }
+
+  /**
+   * opens, at once, the collapsed details of a rich message that hold the match a highlight is about to light up;
+   * gives back the text container and the match as that container counts it, ready to be highlighted
+   */
+  private expandBubbleTextDetails(element: HTMLElement, match: TextHighlightMatch) {
+    const container = this.getBubbleTextContainer(element);
+    if(!container) {
+      return;
+    }
+
+    const containerMatch = this.getBubbleTextMatch(container, match);
+    expandTextMatchDetails(container, containerMatch, BUBBLE_TEXT_HIGHLIGHT_SKIP);
+    return {container, match: containerMatch};
   }
 
   /** a match as the text it is looked for in counts: a rich message's quote counts its offset in its texts */
@@ -12491,7 +12516,7 @@ export default class ChatBubbles {
         bubble.classList.add('hidden-profile');
       } else {
         const titlePeerId = storyFromPeerId || fwdFromId || message.fromId;
-        title = this.createTitle(titlePeerId, wrapOptions, isForward).element;
+        title = this.createTitle(titlePeerId, wrapOptions, isForward, loadPromises).element;
       }
 
       let replyContainer: HTMLElement;
@@ -12526,7 +12551,8 @@ export default class ChatBubbles {
           lazyLoadQueue: this.lazyLoadQueue,
           needUpdate: this.needUpdate,
           isStandaloneMedia: context.isStandaloneMedia,
-          isOut
+          isOut,
+          loadPromises
         });
       }
 
@@ -12611,7 +12637,7 @@ export default class ChatBubbles {
               title.append(wrapEmojiText(fwdFromName));
             } else {
               const peerId = getPeerId(fwdFrom.saved_from_id);
-              const {element, textColorProperty} = this.createTitle(peerId, wrapOptions, false);
+              const {element, textColorProperty} = this.createTitle(peerId, wrapOptions, false, loadPromises);
               element.style.color = `rgb(var(--${textColorProperty}))`;
               title = element;
             }
@@ -12673,7 +12699,7 @@ export default class ChatBubbles {
           nameDiv.append(' ');
         }
 
-        const visitorTitle = new PeerTitle({peerId: guestChatViaFromId, onlyFirstName: true, link: true, wrapOptions}).element;
+        const visitorTitle = createPeerTitleElement({peerId: guestChatViaFromId, onlyFirstName: true, link: true, wrapOptions}, loadPromises);
         const span = document.createElement('span');
         span.classList.add('is-guest-chat-for');
         span.append(i18n('GuestChatFor'), ' ', visitorTitle);
@@ -12791,7 +12817,7 @@ export default class ChatBubbles {
     if(isEphemeral || isWelcomeFirst) {
       // the chip over a sticker is styled by what the bubble is, and a template is no ephemeral yet
       bubble.classList.toggle('is-welcome-first', isWelcomeFirst);
-      const badge = this.createEphemeralBadge(message as Message.message, wrapOptions);
+      const badge = this.createEphemeralBadge(message as Message.message, wrapOptions, loadPromises);
       placeEphemeralBadge(
         bubbleContainer,
         nameDiv,
@@ -13048,6 +13074,8 @@ export default class ChatBubbles {
       bubble.classList.contains('service') ||
       bubble.classList.contains('is-unsupported')
     ) {
+      // * on the wallpaper, out of the bubble's background
+      reactionsElement.classList.add('is-outside');
       bubble.querySelector('.bubble-content-wrapper').append(reactionsElement);
     } else {
       const timeSpan = bubble.timeSpan;
@@ -13397,31 +13425,38 @@ export default class ChatBubbles {
   }
 
 
-  private createTitle(peerId: PeerId, wrapOptions: WrapSomethingOptions, isForward?: boolean) {
+  /**
+   * A name drawn into a bubble: its text and icons come after an await, so the render waits for them
+   * (`loadPromises`) and the bubble is attached with the name already at its height
+   */
+  private createTitle(peerId: PeerId, wrapOptions: WrapSomethingOptions, isForward: boolean, loadPromises: Promise<any>[]) {
     const colorIndex = getPeerColorIndexByPeer(apiManagerProxy.getPeer(peerId));
     let textColorProperty: string;
     if(colorIndex !== -1) {
       textColorProperty = `peer-${colorIndex}-color-rgb`;
     }
 
+    // * a name in a message opens its peer on click (onBubblesClick)
+    const element = createPeerTitleElement({
+      peerId,
+      withPremiumIcon: !isForward,
+      link: true,
+      wrapOptions: {
+        ...wrapOptions,
+        textColor: textColorProperty
+      }
+    }, loadPromises);
+
     return {
-      // * a name in a message opens its peer on click (onBubblesClick)
-      element: new PeerTitle({
-        peerId,
-        withPremiumIcon: !isForward,
-        link: true,
-        wrapOptions: {
-          ...wrapOptions,
-          textColor: textColorProperty
-        }
-      }).element,
+      element,
       textColorProperty
     };
   }
 
   private createEphemeralBadge(
     message: MyEphemeralMessage | Message.message,
-    wrapOptions: WrapSomethingOptions
+    wrapOptions: WrapSomethingOptions,
+    loadPromises: Promise<any>[]
   ) {
     const container = document.createElement('div');
     container.classList.add('ephemeral-badge-container', 'bubble-name-chip-container');
@@ -13436,12 +13471,12 @@ export default class ChatBubbles {
     if(message.pFlags.out && !message.pFlags.welcome_template) {
       const receiverPeerId = message.ephemeral_receiver_id.toPeerId(false);
       const receiver = apiManagerProxy.getPeer(receiverPeerId);
-      const receiverTitle = new PeerTitle({
+      const receiverTitle = createPeerTitleElement({
         peerId: receiverPeerId,
         username: !!getPeerActiveUsernames(receiver)[0],
         dialog: false,
         wrapOptions
-      }).element;
+      }, loadPromises);
       receiverTitle.classList.add('ephemeral-badge-peer');
       badge.append(i18n('Ephemeral.VisibleTo', [receiverTitle]));
     } else {
@@ -15859,14 +15894,12 @@ export default class ChatBubbles {
       isOut,
       makePeerTitle: promises ?
         (peerId) => {
-          const peerTitle = new PeerTitle({peerId, link: true});
-          promises.push(peerTitle.ready);
-          return peerTitle.element;
+          return createPeerTitleElement({peerId, link: true}, promises);
         } :
         () => document.createElement('span'),
       makeMessagePeerTitle: wrapOptions ?
         (peerId) => {
-          const {element, textColorProperty} = this.createTitle(peerId, wrapOptions, false);
+          const {element, textColorProperty} = this.createTitle(peerId, wrapOptions, false, promises);
           element.style.color = `rgb(var(--${textColorProperty}))`;
           return element;
         } :
