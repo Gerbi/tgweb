@@ -1,0 +1,14 @@
+// The build (public/) served at gerbi.org as an assets-only Worker.
+// Deploy with `pnpm deploy:cloudflare` (scripts/deploy-cloudflare.mjs), which
+// stages public/ without its source maps into the assets directory below.
+{
+  "name": "tgweb",
+  "compatibility_date": "2026-10-01",
+  "assets": {"directory": "./tmp/cloudflare-site"},
+  "routes": [
+    {"pattern": "gerbi.org", "custom_domain": true},
+    {"pattern": "www.gerbi.org", "custom_domain": true}
+  ],
+  "workers_dev": true,
+  "preview_urls": true
+}
