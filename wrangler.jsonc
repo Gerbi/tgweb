@@ -9,6 +9,6 @@
     {"pattern": "gerbi.org", "custom_domain": true},
     {"pattern": "www.gerbi.org", "custom_domain": true}
   ],
-  "workers_dev": true,
-  "preview_urls": true
+  "workers_dev": false,
+  "preview_urls": false
 }
