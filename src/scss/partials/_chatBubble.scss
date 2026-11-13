@@ -897,6 +897,16 @@ $message-out-gradient-phases: 0, 1, 2, 3, 4, 5, 6, 7;
     }
   }
 
+  // a link preview's large photo or video sets the bubble's width, as in Telegram Desktop: the headers above it
+  // (the reply, the name line with a forward or a bot) add nothing to that width, they fill what it gives and elide
+  &.has-webpage.photo:not(.is-square-photo),
+  &.has-webpage.video {
+    .bubble-content > .reply,
+    .bubble-content > .name {
+      contain: inline-size;
+    }
+  }
+
   &.emoji-big .emoji-image {
     height: 1.125rem;
     width: 1.125rem;
@@ -1068,11 +1078,7 @@ $message-out-gradient-phases: 0, 1, 2, 3, 4, 5, 6, 7;
 
   .attachment {
     max-width: 100%;
-    border-start-start-radius: var(--border-start-start-radius);
-    border-start-end-radius: var(--border-start-end-radius);
-    border-end-start-radius: var(--border-end-start-radius);
-    border-end-end-radius: var(--border-end-end-radius);
-    overflow: hidden;
+    @include bubble-corners(start, end);
     user-select: none;
 
     //-webkit-mask-image: -webkit-radial-gradient(circle, white 100%, black 100%); // fix safari overflow
