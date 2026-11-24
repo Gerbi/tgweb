@@ -200,9 +200,15 @@ export class ApiFileManager extends AppManager {
       this.webFileDcId = config.webfile_dc_id;
     });
 
-    this.rootScope.addEventListener('app_config', (appConfig) => {
+    const setPartLimits = (appConfig: MTAppConfig) => {
       this.maxUploadParts = this.rootScope.premium ? appConfig.upload_max_fileparts_premium : appConfig.upload_max_fileparts_default;
       this.maxDownloadParts = appConfig.upload_max_fileparts_premium;
+    };
+
+    this.rootScope.addEventListener('app_config', setPartLimits);
+    // * Premium bought or gone in the session: its upload limit comes or goes with it, not with the next app config
+    this.rootScope.addEventListener('premium_toggle', async() => {
+      setPartLimits(await this.apiManager.getAppConfig());
     });
 
     if(PREPARE_CACHE) {
@@ -347,8 +353,11 @@ export class ApiFileManager extends AppManager {
       }
     }
 
-    // a rich message's media past its bytes is still uploading: the messages manager gives it up
-    return canceled || !!this.appMessagesManager?.cancelPreparedRichMessageMedia(fileName);
+    // a rich message's media past its bytes is still uploading, or a file send waits its turn to upload: the
+    // messages manager gives it up
+    return canceled ||
+      !!this.appMessagesManager?.cancelPreparedRichMessageMedia(fileName) ||
+      !!this.appMessagesManager?.cancelQueuedFileSend(fileName);
   }
 
   public cancelDownloadByReference(reference: ReferenceBytes) {

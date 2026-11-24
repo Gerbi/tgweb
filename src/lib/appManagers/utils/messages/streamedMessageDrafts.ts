@@ -34,7 +34,13 @@ export type StreamedMessageDraftRemovalReason = 'superseded' | 'cancelled' | 'ex
 
 export type StreamedMessageFinalCandidate = StreamedMessageDraftScope & {
   kind: StreamedMessageDraftContent['kind'],
-  matchText: string
+  matchText: string,
+  /**
+   * A private chat with the bot: its final text may rewrite the draft entirely (a thinking
+   * placeholder, say), as Android adopts it there. Elsewhere a final text takes over only a draft it
+   * continues — a group's other messages from the bot (a reply to someone else, a notice) are not its answer.
+   */
+  canRewrite?: boolean
 };
 
 type UpsertOptions = StreamedMessageDraftScope & {
@@ -281,8 +287,12 @@ export default class StreamedMessageDrafts {
     return {draft: updated, removed: false};
   }
 
-  public adopt(candidate: StreamedMessageFinalCandidate) {
-    const best = chooseStreamedMessageDraftForFinal(this.drafts.values(), candidate);
+  /**
+   * Without `fallback` only a draft the final continues is taken: a caller trying several scopes
+   * asks each of them that first, so one scope's newest draft cannot win over another's match.
+   */
+  public adopt(candidate: StreamedMessageFinalCandidate, fallback = true) {
+    const best = chooseStreamedMessageDraftForFinal(this.drafts.values(), candidate, fallback);
     if(!best) return;
 
     this.drafts.delete(best.key);
@@ -296,13 +306,14 @@ export default class StreamedMessageDrafts {
 
 export function chooseStreamedMessageDraftForFinal(
   drafts: Iterable<StreamedMessageDraft>,
-  candidate: StreamedMessageFinalCandidate
+  candidate: StreamedMessageFinalCandidate,
+  fallback = true
 ) {
   let bestSameKind: StreamedMessageDraft;
   let bestSameKindPrefix = 0;
   let bestOtherKind: StreamedMessageDraft;
   let bestOtherKindPrefix = 0;
-  let newestRich: StreamedMessageDraft;
+  let newestSameKind: StreamedMessageDraft;
 
   for(const draft of drafts) {
     if(!isSameScope(draft, candidate)) {
@@ -310,10 +321,10 @@ export function chooseStreamedMessageDraftForFinal(
     }
 
     if(
-      draft.content.kind === 'rich' &&
-      (!newestRich || draft.updatedAt > newestRich.updatedAt)
+      draft.content.kind === candidate.kind &&
+      (!newestSameKind || draft.updatedAt > newestSameKind.updatedAt)
     ) {
-      newestRich = draft;
+      newestSameKind = draft;
     }
 
     const prefix = getCommonPrefixLength(
@@ -341,10 +352,19 @@ export function chooseStreamedMessageDraftForFinal(
     }
   }
 
+  const best = bestSameKind || bestOtherKind;
+  if(best || !fallback) {
+    return best;
+  }
+
   // A rich message can contain only media and therefore have no flattened text.
   // Desktop adopts the newest rich draft in that case, and also uses it as the
   // final fallback when a rich stream rewrites all visible text at once.
-  return bestSameKind || bestOtherKind || (candidate.kind === 'rich' ? newestRich : undefined);
+  // A text final does that only where it may rewrite its draft (`canRewrite`);
+  // an empty one is media, which may well be unrelated to the stream.
+  return candidate.kind === 'rich' || candidate.canRewrite && candidate.matchText ?
+    newestSameKind :
+    undefined;
 }
 
 function isSameScope(a: StreamedMessageDraftScope, b: StreamedMessageDraftScope) {

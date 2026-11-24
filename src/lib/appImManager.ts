@@ -1478,8 +1478,15 @@ export class AppImManager extends EventListenerBase<{
 
     // ! the url comes off a keyboard button, i.e. off the wire, so it opens through the same helper
     // ! as every other url in the client — protocol filter and lookalike-host confirmation included
-    const onUrlAuthResultAccepted = (urlAuthResult: UrlAuthResult.urlAuthResultAccepted) => {
-      safeWindowOpen(urlAuthResult.url);
+    // * the link the login gave, else the button's own
+    const openUrlAuthResult = (urlAuthResult?: UrlAuthResult) => {
+      safeWindowOpen(urlAuthResult?._ === 'urlAuthResultAccepted' ? urlAuthResult.url : url);
+    };
+    // * a request the server refused opens the link all the same, as tdesktop does (but for an account left meanwhile)
+    const onUrlAuthError = (err: ApiError) => {
+      if(err?.type !== 'MIDDLEWARE') {
+        openUrlAuthResult();
+      }
     };
 
     const onUrlAuthResult = async(urlAuthResult: UrlAuthResult): Promise<void> => {
@@ -1535,19 +1542,17 @@ export class AppImManager extends EventListenerBase<{
           return;
         }
 
-        const result = await managers.appSeamlessLoginManager.acceptUrlAuth(
+        // * the link opens whatever the answer, as tdesktop's UrlAuthBox does: a refusal, or the question asked again,
+        // * opens it as it is
+        return managers.appSeamlessLoginManager.acceptUrlAuth(
           url,
           peerId,
           mid,
           buttonId,
           allowMessagesChecked
-        );
-
-        return onUrlAuthResult(result);
-      } else if(urlAuthResult._ === 'urlAuthResultAccepted') {
-        onUrlAuthResultAccepted(urlAuthResult);
+        ).then(openUrlAuthResult, onUrlAuthError);
       } else {
-        safeWindowOpen(url);
+        openUrlAuthResult(urlAuthResult);
       }
     };
 
@@ -1558,12 +1563,7 @@ export class AppImManager extends EventListenerBase<{
       buttonId
     ).then((urlAuthResult) => {
       onUrlAuthResult(urlAuthResult);
-    }, (err: ApiError) => {
-      // * a request the server refused opens the link all the same, as tdesktop does (but for an account left meanwhile)
-      if(err?.type !== 'MIDDLEWARE') {
-        safeWindowOpen(url);
-      }
-    });
+    }, onUrlAuthError);
   }
 
   private handleAutologinDomains() {
@@ -2040,13 +2040,15 @@ export class AppImManager extends EventListenerBase<{
         const postId = params.post !== undefined ? +params.post : undefined;
         const messageId = postId || (params.message !== undefined ? +params.message : undefined);
         const threadId = params.thread !== undefined ? +params.thread : undefined;
+        const commentId = params.comment !== undefined ? +params.comment : undefined;
 
         switch(p[0]) {
           case '@': {
             this.openUsername({
               userName: p,
               lastMsgId: messageId,
-              threadId
+              threadId,
+              commentId
             });
             break;
           }
@@ -2070,6 +2072,7 @@ export class AppImManager extends EventListenerBase<{
                   peer: community,
                   lastMsgId: messageId,
                   threadId,
+                  commentId,
                   call: params.call
                 });
               })
@@ -2097,6 +2100,7 @@ export class AppImManager extends EventListenerBase<{
                 peer,
                 lastMsgId: messageId,
                 threadId,
+                commentId,
                 call: params.call
               });
             });
@@ -2220,17 +2224,18 @@ export class AppImManager extends EventListenerBase<{
       await callsController.ringRequestedCall(options.call);
     }
 
-    if(threadId) {
-      return this.openThread({
-        ...(options as any as Parameters<AppImManager['openThread']>[0]),
-        peerId
-      });
-    } else if(commentId) {
+    // * a comment wins over a thread, as in tdesktop: `?comment=` names the post's own thread
+    if(commentId && lastMsgId) {
       return this.openComment({
         peerId,
         msgId: lastMsgId,
         commentId,
         wholeAlbum: options.wholeAlbum
+      });
+    } else if(threadId) {
+      return this.openThread({
+        ...(options as any as Parameters<AppImManager['openThread']>[0]),
+        peerId
       });
     }
 
@@ -2293,19 +2298,38 @@ export class AppImManager extends EventListenerBase<{
   /**
    * Opens comment directly from original channel
    */
-  public openComment(options: {
+  public async openComment(options: {
     peerId: PeerId,
     msgId: number,
     commentId: number
   } & Pick<ChatSetPeerOptions, 'wholeAlbum'>) {
-    return this.managers.appMessagesManager.getDiscussionMessage(options.peerId, options.msgId).then((message) => {
-      if(!message) return;
-      return this.openThread({
-        peerId: message.peerId,
-        lastMsgId: options.commentId,
-        threadId: message.mid,
-        wholeAlbum: options.wholeAlbum
-      });
+    const managers = bindManagersToSession(this.managers);
+    let message: Awaited<ReturnType<typeof managers.appMessagesManager.getDiscussionMessage>>;
+    try {
+      message = await managers.appMessagesManager.getDiscussionMessage(options.peerId, options.msgId);
+    } catch(err) {
+      if(isSessionLeaving(getManagersSession(managers))) return;
+      // * tdesktop's showRepliesForMessage says why the comments did not open
+      const type = (err as ApiError)?.type;
+      if(type === 'CHANNEL_PRIVATE' || type === 'USER_BANNED_IN_CHANNEL') {
+        toastNew({langPackKey: 'Community.GroupNotAccessible'});
+      } else if(type === 'MSG_ID_INVALID') {
+        toastNew({langPackKey: 'MessageNotFound'});
+      }
+      return;
+    }
+
+    if(isSessionLeaving(getManagersSession(managers))) return;
+    if(!message) {
+      toastNew({langPackKey: 'MessageNotFound'});
+      return;
+    }
+
+    return this.openThread({
+      peerId: message.peerId,
+      lastMsgId: options.commentId,
+      threadId: message.mid,
+      wholeAlbum: options.wholeAlbum
     });
   }
 
@@ -4027,10 +4051,6 @@ export class AppImManager extends EventListenerBase<{
     }
 
     const isUser = peerId.isUser();
-    if(isUser && await managers.appUsersManager.isBot(peerId)) {
-      // log('a bot');
-      return;
-    }
 
     // * a peer that hasn't reached the mirror yet has no title to render and would be
     // * named "Deleted", so it doesn't get counted either — a private chat never names anyone
@@ -4241,9 +4261,9 @@ export class AppImManager extends EventListenerBase<{
 
     const subtitle = getUserStatusString(user);
 
-    if(!user.pFlags.bot && !user.pFlags.support) {
+    if(!user.pFlags.support) {
       let typingEl = await this.getPeerTyping(userId.toPeerId());
-      if(!typingEl && user.status?._ === 'userStatusOnline') {
+      if(!typingEl && !user.pFlags.bot && user.status?._ === 'userStatusOnline') {
         typingEl = document.createElement('span');
         typingEl.classList.add('online');
         typingEl.append(subtitle);

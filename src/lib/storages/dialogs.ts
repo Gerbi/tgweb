@@ -866,11 +866,15 @@ export default class DialogsStorage extends AppManager {
 
     const newDialogIndex = noIndex ? undefined : this.setDialogIndexInFilter(dialog, indexKey, filter);
 
-    if(wasDialogIndex === newDialogIndex) {
+    // * whether the folder holds the dialog is whether it is in its list, not whether the entry there still has an index:
+    // * a dialog saved anew (`saveDialog`) has the new one's fields copied over the kept object, which wipes its indexes,
+    // * and a dialog that fits the folder no more (archived elsewhere, read in an unread-only folder) has to leave it
+    const wasInFolder = wasIndex !== -1;
+    if(wasDialogIndex === newDialogIndex && wasInFolder === !!newDialogIndex) {
       return false;
     }
 
-    if(!!wasDialogIndex !== !!newDialogIndex) {
+    if(wasInFolder !== !!newDialogIndex) {
       this.prepareFolderUnreadCountModifyingByDialog(folderId, dialog, !!newDialogIndex);
     }
 
@@ -995,9 +999,11 @@ export default class DialogsStorage extends AppManager {
         forumUnreadCount.then(({count, hasUnmuted}) => {
           dialog = this.getDialogOnly(peerId);
           const folder = this.getFolder(folderId);
+          // * shown as messages meanwhile: what is unread of it is its messages now, counted by that switch's own recount
           if(
             !dialog ||
             !this.appPeersManager.isForum(peerId) ||
+            dialog.pFlags.view_forum_as_messages ||
             !folder ||
             !folder.dialogs.some((dialog) => dialog.peerId === peerId)
           ) {
@@ -1016,9 +1022,12 @@ export default class DialogsStorage extends AppManager {
 
         return;
       } else {
+        // * the forum's unread state as it is read everywhere else: its unread topics, or an unread mark it keeps with
+        // * none (set while it was shown as messages, or elsewhere)
+        const state = this.getDialogUnreadState(dialog as Dialog, !this.isDialogUnmuted(dialog));
         addMessagesCount = 0;
-        toggleDialog = forumUnreadCount.count > 0;
-        toggleUnmuted = forumUnreadCount.hasUnmuted;
+        toggleDialog = state.count > 0;
+        toggleUnmuted = state.unmuted;
       }
     }
 
@@ -2014,7 +2023,7 @@ export default class DialogsStorage extends AppManager {
         filterId/*  as REAL_FOLDER_ID */;
     let curDialogStorage = this.getFolderDialogs(filterId, skipMigrated);
 
-    const indexKey = this.getDialogIndexKeyByFilterId(filterId);
+    let indexKey = this.getDialogIndexKeyByFilterId(filterId);
     const isSearchSupported = filterType !== FilterType.Saved;
     const isServerSearchSupported = filterType === FilterType.Forum;
 
@@ -2088,8 +2097,12 @@ export default class DialogsStorage extends AppManager {
       const folder = this.getFolder(filterId);
       folder.count = result.count;
 
-      if(skipMigrated) {
-        curDialogStorage = this.getFolderDialogs(filterId, skipMigrated);
+      // * the list as it is now, not the one read before the page was asked for: a reorder of the folders meanwhile
+      // * (filter_order) builds every folder's list anew, and a chat folder's index goes with its place - unless the
+      // * chat folder is gone meanwhile, and its index with it
+      curDialogStorage = this.getFolderDialogs(filterId, skipMigrated);
+      if(isVirtualFilter || REAL_FOLDERS.has(filterId) || this.filtersStorage.getFilter(filterId)) {
+        indexKey = this.getDialogIndexKeyByFilterId(filterId);
       }
 
       offset = this.getOffsetByIndex(curDialogStorage, offsetIndex, indexKey);
@@ -2189,7 +2202,8 @@ export default class DialogsStorage extends AppManager {
       return !excludedPeerIds?.has(peerId);
     });
     for(const peerId of peerIds) {
-      await this.appMessagesManager.markDialogUnread({peerId, read: true});
+      // * a chat that cannot be read (gone, refused by the server) does not leave the rest of the folder unread
+      await this.appMessagesManager.markDialogUnread({peerId, read: true}).catch(noop);
     }
   }
 
@@ -2892,8 +2906,15 @@ export default class DialogsStorage extends AppManager {
       return;
     }
 
+    if(!!dialog.pFlags.view_forum_as_messages === update.enabled) {
+      return;
+    }
+
     if(update.enabled) dialog.pFlags.view_forum_as_messages = true;
     else delete dialog.pFlags.view_forum_as_messages;
     this.setDialogToState(dialog);
+    // * what is unread of a forum is its topics, of one shown as messages its messages: its folders count it, and its
+    // * row shows it, the new way
+    this.processChangedUnreadOrUnmuted(peerId);
   };
 }

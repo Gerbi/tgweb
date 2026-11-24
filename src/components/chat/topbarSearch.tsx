@@ -1192,6 +1192,8 @@ export default function TopbarSearch(props: {
       return;
     }
 
+    props.chat.topbar.container.classList.add('is-searching-mobile');
+
     const index = () => whichMessage(target());
 
     const footerElement = SearchFooter({
@@ -1250,6 +1252,7 @@ export default function TopbarSearch(props: {
     });
 
     onCleanup(() => {
+      props.chat.topbar.container.classList.remove('is-searching-mobile');
       footerElement.remove();
       setShowingSmallResults(false);
       onShowingSmallResultsChange();
